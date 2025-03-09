@@ -8,7 +8,7 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 {-# OPTIONS_GHC -fwarn-incomplete-uni-patterns #-}
-
+{-# LANGUAGE NamedFieldPuns #-}
 module LLVM.Pretty (
   ppllvm,
   ppll,
@@ -51,9 +51,9 @@ import qualified Data.ByteString.Short as SBF
 import qualified Data.ByteString.Lazy.Char8 as BF
 import Data.ByteString.Lazy (fromStrict)
 import Data.ByteString.Internal (w2c)
-import Data.Text.Prettyprint.Doc
-import qualified Data.Text.Prettyprint.Doc as P
-import Data.Text.Prettyprint.Doc.Render.Text
+import Prettyprinter
+import qualified Prettyprinter as P
+import Prettyprinter.Render.Text
 
 import qualified Data.ByteString.Char8 as BL
 import qualified Data.ByteString.Short as BS
@@ -180,7 +180,7 @@ instance Pretty Name where
         first = head name
         isFirst c = isLetter c || c == '-' || c == '_' || c == '$' || c == '.'
         isRest c = isDigit c || isFirst c
-  pretty (UnName x) = pretty ( (fromIntegral x) :: Int)
+  pretty (UnName x) = pretty ( fromIntegral x :: Int)
 
 instance Pretty Parameter where
   pretty (Parameter ty (UnName _) attrs) = pretty ty <+> ppParamAttributes attrs
@@ -220,7 +220,7 @@ instance Pretty Type where
   pretty (PointerType ref (AS.AddrSpace addr))
     | addr == 0 = pretty ref <> "*"
     | otherwise = pretty ref <+> "addrspace" <> parens (pretty addr) <> "*"
-  pretty ft@(FunctionType {..}) = pretty resultType <+> ppFunctionArgumentTypes ft
+  pretty ft@(FunctionType {..}) = pretty resultType <+> ppFunctionArgumentTypes argumentTypes isVarArg
   pretty (VectorType {..}) = "<" <> pretty nVectorElements <+> "x" <+> pretty elementType <> ">"
   pretty (StructureType {..}) = if isPacked
                                then "<{" <> (commas $ fmap pretty elementTypes ) <> "}>"
@@ -312,6 +312,7 @@ instance Pretty FunctionAttribute where
    FA.ReadNone         -> "readnone"
    FA.ReadOnly         -> "readonly"
    FA.WriteOnly        -> "writeonly"
+   FA.NoFree           -> "nofree"
    NoInline            -> "noinline"
    AlwaysInline        -> "alwaysinline"
    MinimizeSize        -> "minsize"
@@ -348,6 +349,10 @@ instance Pretty FunctionAttribute where
    FA.StringAttribute k v -> dquotes (short k) <> "=" <> dquotes (short v)
    Speculatable        -> "speculatable"
    StrictFP            -> "strictfp"
+   MustProgress        -> "mustprogress"
+   NoSync              -> "nosync"
+   WillReturn          -> "willreturn"
+
 
 instance Pretty ParameterAttribute where
   pretty = \case
@@ -363,6 +368,7 @@ instance Pretty ParameterAttribute where
     PA.ReadNone                -> "readnone"
     PA.ReadOnly                -> "readonly"
     PA.WriteOnly               -> "writeonly"
+    PA.NoFree                  -> "nofree"
     InAlloca                   -> "inalloca"
     NonNull                    -> "nonnull"
     Dereferenceable word       -> "dereferenceable" <> parens (pretty word)
@@ -475,7 +481,7 @@ instance Pretty Terminator where
      brackets (hsep [ label (pretty l) | l <- dests ])
      <+> ppInstrMeta meta
 
-    e @ Invoke {..} ->
+    e@Invoke {..} ->
      ppInvoke e
      <+> "to" <+> label (pretty returnDest)
      <+> "unwind" <+> label (pretty exceptionDest)
@@ -517,6 +523,7 @@ instance Pretty Instruction where
     FAdd {..}   -> "fadd" <+> (pretty fastMathFlags) <+> ppTyped operand0 `cma` pretty operand1 <+> ppInstrMeta metadata
     FSub {..}   -> "fsub" <+> (pretty fastMathFlags) <+> ppTyped operand0 `cma` pretty operand1 <+> ppInstrMeta metadata
     FMul {..}   -> "fmul" <+> (pretty fastMathFlags) <+> ppTyped operand0 `cma` pretty operand1 <+> ppInstrMeta metadata
+    FNeg {..} -> "fneg" <+> pretty fastMathFlags <+> ppTyped operand0
     FDiv {..}   -> "fdiv" <+> (pretty fastMathFlags) <+> ppTyped operand0 `cma` pretty operand1 <+> ppInstrMeta metadata
     FRem {..}   -> "frem" <+> (pretty fastMathFlags) <+> ppTyped operand0 `cma` pretty operand1 <+> ppInstrMeta metadata
     FCmp {..}   -> "fcmp" <+> pretty fpPredicate <+> ppTyped operand0 `cma` pretty operand1 <+> ppInstrMeta metadata
@@ -553,9 +560,10 @@ instance Pretty Instruction where
     SIToFP {..} -> "sitofp" <+> ppTyped operand0 <+> "to" <+> pretty type' <+> ppInstrMeta metadata
     PtrToInt {..} -> "ptrtoint" <+> ppTyped operand0 <+> "to" <+> pretty type' <+> ppInstrMeta metadata
     IntToPtr {..} -> "inttoptr" <+> ppTyped operand0 <+> "to" <+> pretty type' <+> ppInstrMeta metadata
+    Freeze {..} -> "freeze" <+> pretty type' <+> ppTyped operand0 
 
     InsertElement {..} -> "insertelement" <+> commas [ppTyped vector, ppTyped element, ppTyped index] <+> ppInstrMeta metadata
-    ShuffleVector {..} -> "shufflevector" <+> commas [ppTyped operand0, ppTyped operand1, ppTyped mask] <+> ppInstrMeta metadata
+    ShuffleVector {..} -> "shufflevector" <+> commas [ppTyped operand0, ppTyped operand1 ] <+> ppInstrMeta metadata
     ExtractElement {..} -> "extractelement" <+> commas [ppTyped vector, ppTyped index] <+> ppInstrMeta metadata
     InsertValue {..} -> "insertvalue" <+> commas (ppTyped aggregate : ppTyped element : fmap pretty indices') <+> ppInstrMeta metadata
 
@@ -665,6 +673,8 @@ ppDWOp o = case o of
   DW_OP_Shra -> ["DW_OP_Shra"]
   DW_OP_Shl -> ["DW_OP_Shl"]
   DW_OP_Dup -> ["DW_OP_Dup"]
+  DW_OP_Bregx -> ["DW_OP_bregx"]
+  DW_OP_PushObjectAddress -> ["DW_OP_push_object_address"]
 
 instance Pretty DIGlobalVariableExpression where
   pretty e = ppDINode "DIGlobalVariableExpression"
@@ -742,6 +752,11 @@ instance Pretty DIScope where
   pretty (DINamespace ns) = pretty ns
   pretty (DIType t) = pretty t
 
+instance Pretty DIBound where
+  pretty (DIBoundConstant c) = pretty c
+  pretty (DIBoundVariable v) = pretty v
+  pretty (DIBoundExpression e) = pretty e
+
 instance Pretty DISubrange where
   pretty Subrange {..} = ppDINode "DISubrange" [("count", Just (pretty count)), ("lowerBound", Just (pretty lowerBound))]
 
@@ -787,7 +802,7 @@ instance Pretty DICompileUnit where
     , ("splitDebugInlining", Just (ppBoolean splitDebugInlining))
     , ("debugInfoForProfiling", Just (ppBoolean debugInfoForProfiling))
     , ("nameTableKind", Just (pretty nameTableKind))
-    , ("debugBaseAddress", Just (ppBoolean debugBaseAddress))
+    --, ("debugBaseAddress", Just (ppBoolean debugBaseAddress))
     ]
 
 instance Pretty DebugEmissionKind where
@@ -812,7 +827,7 @@ instance Pretty DIModule where
     , ("name", ppSbs name)
     , ("configMacros", ppSbs configurationMacros)
     , ("includePath", ppSbs includePath)
-    , ("isysroot", ppSbs isysRoot)
+    --, ("isysroot", ppSbs isysRoot)
     ]
 
 instance Pretty DINamespace where
@@ -1223,6 +1238,8 @@ instance Pretty RMW.RMWOperation where
     RMW.Min -> "min"
     RMW.UMax -> "umax"
     RMW.UMin -> "umin"
+    RMW.FAdd -> "fadd"
+    RMW.FSub -> "fsub"
 
 instance Pretty DataLayout where
   pretty x = pretty (BL.unpack (dataLayoutToString x))
@@ -1288,9 +1305,8 @@ ppParams ppParam (ps, varrg) = parens . commas $ fmap ppParam ps ++ vargs
     where
         vargs = if varrg then ["..."] else []
 
-ppFunctionArgumentTypes :: Type -> Doc ann
-ppFunctionArgumentTypes FunctionType {..} = ppParams pretty (argumentTypes, isVarArg)
-ppFunctionArgumentTypes _ = error "Non-function argument. (Malformed AST)"
+ppFunctionArgumentTypes :: [Type] -> Bool -> Doc ann
+ppFunctionArgumentTypes argumentTypes isVarArg = ppParams pretty (argumentTypes, isVarArg)
 
 ppNullInitializer :: Type -> Doc ann
 ppNullInitializer PointerType {..} = "zeroinitializer"
@@ -1301,14 +1317,14 @@ ppNullInitializer _ = error "Non-pointer argument. (Malformed AST)"
 
 ppCall :: Instruction -> Doc ann
 ppCall Call { function = Right f,..}
-  = tail <+> "call" <+> pretty callingConvention <+> ppReturnAttributes returnAttributes <+> pretty resultType <+> ftype
+  = tail <+> "call" <+> pretty callingConvention <+> ppReturnAttributes returnAttributes <+> pretty fnResultType <+> ftype
     <+> pretty f <> parens (commas $ fmap ppArguments arguments) <+> ppFunctionAttributes functionAttributes
     where
-      (functionType@FunctionType {..}) = case (referencedType (typeOf f)) of
-                                           fty@FunctionType {..} -> fty
+      (fnArgumentTypes, fnIsVarArg, fnResultType) = case referencedType (typeOf f) of
+                                           fty@FunctionType { argumentTypes, isVarArg, resultType} ->  (argumentTypes, isVarArg, resultType)
                                            _ -> error "Calling non function type. (Malformed AST)"
-      ftype = if isVarArg
-              then ppFunctionArgumentTypes functionType
+      ftype = if fnIsVarArg
+              then ppFunctionArgumentTypes fnArgumentTypes fnIsVarArg 
               else mempty
       referencedType (PointerType t _) = referencedType t
       referencedType t                 = t
@@ -1343,15 +1359,15 @@ ppReturnAttributes pas = hsep $ fmap pretty pas
 -- identical function. :(
 ppInvoke :: Terminator -> Doc ann
 ppInvoke Invoke { function' = Right f,..}
-  = "invoke" <+> pretty callingConvention' <+> pretty resultType <+> ftype
+  = "invoke" <+> pretty callingConvention' <+> pretty fnResultType <+> ftype
     <+> pretty f <> parens (commas $ fmap ppArguments arguments') <+> ppFunctionAttributes functionAttributes'
     where
-      (functionType@FunctionType {..}) =
+      (fnArgumentTypes, fnIsVarArg, fnResultType) =
         case referencedType (typeOf f) of
-          fty@FunctionType{..} -> fty
+          fty@FunctionType{argumentTypes, isVarArg,resultType} -> (argumentTypes, isVarArg, resultType) 
           _ -> error "Invoking non-function type. (Malformed AST)"
-      ftype = if isVarArg
-              then ppFunctionArgumentTypes functionType
+      ftype = if fnIsVarArg
+              then ppFunctionArgumentTypes fnArgumentTypes fnIsVarArg
               else mempty
       referencedType (PointerType t _) = referencedType t
       referencedType t                 = t
